@@ -11,6 +11,8 @@ from sklearn.model_selection import train_test_split
 import torch.optim as optim
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from torch.nn.functional import mse_loss
+from pandas import DataFrame
 
 DATA_DIR = 'data/PlantVillage/'
 HEALTHY_FOLDER = 'Tomato_healthy'
@@ -27,8 +29,6 @@ CLASS_2_NUM = {
     "Tomato_Bacterial_spot": 8,
     "Tomato_Late_blight": 9
 }
-
-
 
 
 class AutoencoderDataSet(Dataset):
@@ -80,7 +80,7 @@ class AutoencoderDataSet(Dataset):
         unhealthy_indices = [i for i, label in enumerate(self.binary_labels) if label == 1]
 
         train_idx, val_idx = train_test_split(healthy_indices, train_size=train_size, test_size=val_size, random_state=42)
-        
+        np.random.seed(self.random_state)
         val_idx_partition_for_test = list(np.random.choice(val_idx, int(len(val_idx) / 2)))
 
         test_idx = unhealthy_indices + val_idx_partition_for_test
@@ -149,6 +149,7 @@ def save_loss_plot(train_losses, val_losses, lr, beta1, beta2, epoch, folder='re
     plt.show()
     plt.close()
 
+
 def grid_search(autoencoder, train_loader, val_loader, learning_rates, betas, num_epochs=20):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -184,6 +185,7 @@ def grid_search(autoencoder, train_loader, val_loader, learning_rates, betas, nu
 
             save_loss_plot(train_losses, val_losses, lr, beta1, beta2, num_epochs)
 
+
 def visualize_reconstructions(original, reconstructed, n=10):
     original = original.to('cpu').numpy()
     reconstructed = reconstructed.to('cpu').detach().numpy()
@@ -203,11 +205,51 @@ def visualize_reconstructions(original, reconstructed, n=10):
         plt.axis('off')
     plt.show()
 
+
+def generate_output_dataframe(model, test_loader):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    mse_values = []
+    with torch.no_grad():  # No need to track gradients during evaluation
+        for batch_idx, (images, labels) in enumerate(test_loader):
+            images = images.to(device)
+            
+            # Get model reconstructions
+            reconstructions = model(images)
+            
+            # Calculate MSE for each image in the batch
+            for i in range(images.size(0)):
+                mse = nn.MSELoss(reconstructions[i], images[i])
+                mse_values.append({
+                    'image_idx': batch_idx * test_loader.batch_size + i,
+                    'label': labels[i].item(),
+                    'mse': mse.item()
+                })
+
+def generate_output_dataframe(model, test_loader):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    mse_values = []
+    for batch_idx, (images, labels) in enumerate(test_loader):
+                images = images.to(device)
+                
+                reconstructions = model(images)
+                
+                for i in range(images.size(0)):
+                    mse = mse_loss(reconstructions[i], images[i])
+                    mse_values.append({
+                        'image_idx': batch_idx * test_loader.batch_size + i,
+                        'label': labels[i].item(),
+                        'mse': mse.item()
+                    })
+    return DataFrame(mse_values)
+
+
 if __name__ == '__main__':
 
     transform = transforms.Compose([transforms.ToTensor()])
 
-    dataset = AutoencoderDataSet(n_samples_from_each_class=2, transform=transform)
+    dataset = AutoencoderDataSet(n_samples_from_each_class=200, transform=transform)
 
     train_dataset, val_dataset, test_dataset = dataset.get_splits(train_size=0.7, val_size=0.3)
 
