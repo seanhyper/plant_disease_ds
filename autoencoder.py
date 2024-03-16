@@ -13,6 +13,8 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from torch.nn.functional import mse_loss
 from pandas import DataFrame
+import cv2
+
 
 DATA_DIR = 'data/PlantVillage/'
 HEALTHY_FOLDER = 'Tomato_healthy'
@@ -54,7 +56,7 @@ class AutoencoderDataSet(Dataset):
 
                 if self.n_samples_from_each_class:
                     class_sample = list(np.random.choice([os.path.join(subfolder_path, file) for file in os.listdir(subfolder_path)], 
-                                                         min(self.n_samples_from_each_class, len(os.listdir(subfolder_path)))))
+                                                         min(self.n_samples_from_each_class, len(os.listdir(subfolder_path))), replace=False))
                     self.samples += class_sample
                     self.labels += [CLASS_2_NUM[dir]]*self.n_samples_from_each_class
 
@@ -76,17 +78,16 @@ class AutoencoderDataSet(Dataset):
     def get_splits(self, train_size=0.7, val_size=0.3):
         self.convert_labels_to_binary()
 
-        healthy_indices = [i for i, label in enumerate(self.binary_labels) if label == 0]
-        unhealthy_indices = [i for i, label in enumerate(self.binary_labels) if label == 1]
+        healthy_indices = [i for i, label in enumerate(self.labels) if label == 0]
+        unhealthy_indices = [i for i, label in enumerate(self.labels) if label != 0]
 
         train_idx, val_idx = train_test_split(healthy_indices, train_size=train_size, test_size=val_size, random_state=42)
-        np.random.seed(self.random_state)
-        val_idx_partition_for_test = list(np.random.choice(val_idx, int(len(val_idx) / 2)))
+        healthy_for_val, healthy_for_test = train_test_split(val_idx, train_size=0.5, test_size=0.5, random_state=42)
 
-        test_idx = unhealthy_indices + val_idx_partition_for_test
+        test_idx = unhealthy_indices + healthy_for_test
 
         train_dataset = Subset(self, train_idx)
-        val_dataset = Subset(self, [idx for idx in val_idx if idx not in val_idx_partition_for_test])
+        val_dataset = Subset(self, healthy_for_val)
         test_dataset = Subset(self, test_idx)
 
         return train_dataset, val_dataset, test_dataset
@@ -205,28 +206,19 @@ def visualize_reconstructions(original, reconstructed, n=10):
         plt.axis('off')
     plt.show()
 
+def tensor_to_hsv(image_tensor):
+    # Assuming image_tensor is (C, H, W) with values in [0, 1]
+    image_np = (image_tensor.detach().cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    
+    # Convert RGB to HSV
+    image_hsv_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+    
+    # Convert back to tensor, permute back to (C, H, W), and scale to [0, 1]
+    image_hsv_tensor = torch.from_numpy(image_hsv_np).permute(2, 0, 1).float() / 255.0
+    
+    return image_hsv_tensor
 
-def generate_output_dataframe(model, test_loader):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.eval()
-    mse_values = []
-    with torch.no_grad():  # No need to track gradients during evaluation
-        for batch_idx, (images, labels) in enumerate(test_loader):
-            images = images.to(device)
-            
-            # Get model reconstructions
-            reconstructions = model(images)
-            
-            # Calculate MSE for each image in the batch
-            for i in range(images.size(0)):
-                mse = nn.MSELoss(reconstructions[i], images[i])
-                mse_values.append({
-                    'image_idx': batch_idx * test_loader.batch_size + i,
-                    'label': labels[i].item(),
-                    'mse': mse.item()
-                })
-
-def generate_output_dataframe(model, test_loader):
+def generate_output_dataframe(model, test_loader, hsv_evaluation=False):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.eval()
     mse_values = []
@@ -236,13 +228,64 @@ def generate_output_dataframe(model, test_loader):
                 reconstructions = model(images)
                 
                 for i in range(images.size(0)):
-                    mse = mse_loss(reconstructions[i], images[i])
+                    if hsv_evaluation:
+                        original_hsv = tensor_to_hsv(images[i])
+                        reconstructed_hsv = tensor_to_hsv(reconstructions[i])
+                        mse = mse_loss(original_hsv, reconstructed_hsv)
+                    else:
+                        mse = mse_loss(reconstructions[i], images[i])
                     mse_values.append({
                         'image_idx': batch_idx * test_loader.batch_size + i,
                         'label': labels[i].item(),
                         'mse': mse.item()
                     })
     return DataFrame(mse_values)
+
+from torchvision.utils import make_grid
+
+def plot_images_with_mse(dataframe, dataset, model, device='cpu'):
+    """
+    Plots original and reconstructed images based on indices in the dataframe.
+    
+    Parameters:
+    - dataframe (pd.DataFrame): DataFrame with columns 'idx', 'label', and 'mse'.
+    - dataset (torch.utils.data.Dataset): Dataset containing the images.
+    - model (torch.nn.Module): Trained autoencoder model.
+    - device (str): Device to run the model on ('cpu' or 'cuda').
+    - n (int): Number of images to display.
+    """
+    # Ensure the model is in evaluation mode
+    model.eval()
+    
+    # Randomly select n rows from the dataframe
+    n= dataframe.shape[0]
+    
+    fig, axs = plt.subplots(n, 2, figsize=(10, n * 2))  # n rows, 2 columns
+    
+    for i, (idx, row) in enumerate(dataframe.iterrows()):
+        # Extract the image index, label, and mse from the row
+        img_idx, label, mse = row['image_idx'], row['label'], row['mse']
+        
+        # Get the original image from the dataset
+        original_img = dataset.__getitem__(int(img_idx)[0]
+        original_img = original_img.unsqueeze(0).to(device)  # Add batch dimension and send to device
+        
+        # Generate the reconstruction
+        with torch.no_grad():
+            reconstructed_img = model(original_img).cpu().squeeze(0)  # Remove batch dimension and send back to CPU
+        
+        # Plot the original image
+        axs[i, 0].imshow(make_grid(original_img.cpu(), normalize=True).permute(1, 2, 0))
+        axs[i, 0].set_title(f'Original - Label: {label}')
+        axs[i, 0].axis('off')
+        
+        # Plot the reconstructed image with MSE in the title
+        axs[i, 1].imshow(make_grid(reconstructed_img, normalize=True).permute(1, 2, 0))
+        axs[i, 1].set_title(f'Reconstructed - MSE: {mse:.4f}')
+        axs[i, 1].axis('off')
+    
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == '__main__':
@@ -256,6 +299,5 @@ if __name__ == '__main__':
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-    
 
     grid_search(Autoencoder, train_loader, val_loader, [0.001, 0.0001], [(0.9, 0.999), (0.95, 0.999)], num_epochs=20)
