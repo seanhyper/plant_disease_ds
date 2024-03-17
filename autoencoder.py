@@ -130,6 +130,9 @@ class Autoencoder(nn.Module):
         x = self.encoder(x)
         x = self.decoder(x)
         return x
+
+    def encode(self, x):
+        return self.encoder(x)
     
 
 def save_loss_plot(train_losses, val_losses, lr, beta1, beta2, epoch, folder='results/autoencoder'):
